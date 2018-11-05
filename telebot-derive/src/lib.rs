@@ -262,8 +262,12 @@ fn expand_function(ast: syn::MacroInput) -> quote::Tokens {
                             let bot = bot.clone();
                             let bot2 = bot.clone();
                             let msg_str = serde_json::to_string(&msg).unwrap();
+                            let needs_upload = files.as_ref()
+                                .map(|files| files.iter().any(file::File::needs_upload))
+                                .unwrap_or(false);
 
-                            files.ok_or(Error::from(ErrorKind::NoFile)).into_future()
+                            if needs_upload { files } else { None }
+                                .ok_or(Error::from(ErrorKind::NoFile)).into_future()
                                 .and_then(move |files| {
                                     bot.fetch_formdata(#function, &msg, files, #file_kind_name)
                                 })
@@ -309,6 +313,22 @@ fn expand_function(ast: syn::MacroInput) -> quote::Tokens {
                     };
 
                     self.file = new_val;
+
+                    self
+                }
+
+                pub fn file_id(mut self, val: String) -> Self {
+                    self.file = match self.file {
+                        Ok(mut filelist) => {
+                            filelist.push(file::FileWithCaption::new_empty(
+                                file::File::Telegram(val)));
+                            Ok(filelist)
+                        },
+                        Err(_) => {
+                            Err(Error::from(ErrorKind::NoFile))
+                        }
+                    };
+
 
                     self
                 }
