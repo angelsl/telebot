@@ -7,9 +7,9 @@ use failure::{Error, Fail, ResultExt};
 use error::{ErrorKind, TelegramError};
 use file::File;
 
-use std::{str, time::Duration, collections::HashMap, rc::Rc, cell::{Cell, RefCell}};
+use std::{str, collections::HashMap, rc::Rc, cell::{Cell, RefCell}};
 
-use tokio_core::reactor::{Core, Handle, Interval};
+use tokio_core::reactor::{Core, Handle};
 use hyper::{Body, Client, Request, Uri, header::CONTENT_TYPE, client::{HttpConnector, ResponseFuture}};
 use hyper_tls::HttpsConnector;
 use hyper_multipart::client::multipart;
@@ -38,7 +38,6 @@ pub struct Bot {
     pub name: RefCell<Option<String>>,
     pub handle: Handle,
     pub last_id: Cell<u32>,
-    pub update_interval: Cell<u64>,
     pub timeout: Cell<u64>,
     pub handlers: RefCell<HashMap<String, UnboundedSender<(RcBot, objects::Message)>>>,
     pub unknown_handler: RefCell<Option<UnboundedSender<(RcBot, objects::Message)>>>,
@@ -54,7 +53,6 @@ impl Bot {
             key: key.into(),
             name: RefCell::new(None),
             last_id: Cell::new(0),
-            update_interval: Cell::new(1000),
             timeout: Cell::new(30),
             handlers: RefCell::new(HashMap::new()),
             unknown_handler: RefCell::new(None),
@@ -206,13 +204,6 @@ pub fn _fetch(fut_res: ResponseFuture) -> impl Future<Item = String, Error = Err
 }
 
 impl RcBot {
-    /// Sets the update interval to an integer in milliseconds
-    pub fn update_interval(self, interval: u64) -> RcBot {
-        self.inner.update_interval.set(interval);
-
-        self
-    }
-
     /// Sets the timeout interval for long polling
     pub fn timeout(self, timeout: u64) -> RcBot {
         self.inner.timeout.set(timeout);
@@ -260,7 +251,7 @@ impl RcBot {
         );
     }
 
-    /// The main update loop, the update function is called every update_interval milliseconds
+    /// The main update loop.
     /// When an update is available the last_id will be updated and the message is filtered
     /// for commands
     /// The message is forwarded to the returned stream if no command was found
@@ -269,12 +260,7 @@ impl RcBot {
     ) -> impl Stream<Item = (RcBot, objects::Update), Error = Error> + 'a {
         use functions::*;
 
-        let duration = Duration::from_millis(self.inner.update_interval.get());
-        Interval::new(duration, &self.inner.handle)
-            .into_future()
-            .into_stream()
-            .flatten()
-            .map_err(|x| Error::from(x.context(ErrorKind::IntervalTimer)))
+        stream::repeat(())
             .and_then(move |_| {
                 self.get_updates()
                     .offset(self.inner.last_id.get())
