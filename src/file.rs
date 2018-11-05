@@ -32,22 +32,21 @@ pub struct FileList(pub Vec<FileWithCaption>);
 
 impl FileList {
     pub fn to_metadata(&self) -> Option<MediaFile> {
-        if self.0.len() == 0 {
-            None
-        } else if self.0.len() == 1 {
-            //Some(MediaFile::SingleFile(self.0.iter().map(|x| x.file.name()).next().unwrap()))
-            None
-        } else {
-            let entities = self.0.iter().map(|x| {
-                FileEntity::Photo {
-                    type_: "photo",
-                    media: x.file.name(),
-                    caption: x.caption.clone(),
-                    parse_mode: x.parse_mode.clone()
-                }
-            }).collect();
+        match self.0.len() {
+            0 => None,
+            1 => Some(MediaFile::SingleFile(self.0[0].file.name())),
+            _ => {
+                let entities = self.0.iter().map(|x| {
+                    FileEntity::Photo {
+                        type_: "photo",
+                        media: x.file.name(),
+                        caption: x.caption.clone(),
+                        parse_mode: x.parse_mode.clone()
+                    }
+                }).collect();
 
-            Some(MediaFile::MultipleFiles(entities))
+                Some(MediaFile::MultipleFiles(entities))
+            }
         }
     }
 
@@ -90,6 +89,13 @@ impl File {
     pub fn try_from<T: TryIntoFile>(value: T) -> Result<Self, T::Error> {
         value.try_into()
     }
+
+    pub fn needs_upload(&self) -> bool {
+        match *self {
+            File::Memory { .. } | File::Disk { .. } => true,
+            _ => false
+        }
+    }
 }
 
 pub struct FileWithCaption {
@@ -119,6 +125,14 @@ impl FileWithCaption {
 pub trait TryIntoFile: Sized {
     type Error;
     fn try_into(self) -> Result<File, Self::Error>;
+}
+
+impl TryIntoFile for File {
+    type Error = Error;
+
+    fn try_into(self) -> Result<File, Self::Error> {
+        Ok(self)
+    }
 }
 
 /// Construct a Telegram file from a local path
