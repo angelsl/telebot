@@ -7,9 +7,8 @@ use failure::{Error, Fail, ResultExt};
 use error::{ErrorKind, TelegramError};
 use file::File;
 
-use std::{str, collections::HashMap, rc::Rc, cell::{Cell, RefCell}};
+use std::{str, collections::HashMap, sync::{Arc, RwLock, atomic::{Ordering, AtomicUsize}}};
 
-use tokio_core::reactor::{Core, Handle};
 use hyper::{Body, Client, Request, Uri, header::CONTENT_TYPE, client::{HttpConnector, ResponseFuture}};
 use hyper_tls::HttpsConnector;
 use hyper_multipart::client::multipart;
@@ -21,13 +20,13 @@ use futures::{stream, Future, IntoFuture, Stream, sync::mpsc::{self, UnboundedSe
 /// The outer API gets implemented on RcBot
 #[derive(Clone)]
 pub struct RcBot {
-    pub inner: Rc<Bot>,
+    pub inner: Arc<Bot>,
 }
 
 impl RcBot {
-    pub fn new(handle: Handle, key: &str) -> Result<RcBot, Error> {
+    pub fn new(key: &str) -> Result<RcBot, Error> {
         Ok(RcBot {
-            inner: Rc::new(Bot::new(handle, key)?),
+            inner: Arc::new(Bot::new(key)?),
         })
     }
 }
@@ -35,27 +34,25 @@ impl RcBot {
 /// The main bot structure
 pub struct Bot {
     pub key: String,
-    pub name: RefCell<Option<String>>,
-    pub handle: Handle,
-    pub last_id: Cell<u32>,
-    pub timeout: Cell<u64>,
-    pub handlers: RefCell<HashMap<String, UnboundedSender<(RcBot, objects::Message)>>>,
-    pub unknown_handler: RefCell<Option<UnboundedSender<(RcBot, objects::Message)>>>,
+    pub name: RwLock<Option<String>>,
+    pub last_id: AtomicUsize,
+    pub timeout: AtomicUsize,
+    pub handlers: RwLock<HashMap<String, UnboundedSender<(RcBot, objects::Message)>>>,
+    pub unknown_handler: RwLock<Option<UnboundedSender<(RcBot, objects::Message)>>>,
     pub client: Client<HttpsConnector<HttpConnector>, Body>
 }
 
 impl Bot {
-    pub fn new(handle: Handle, key: &str) -> Result<Bot, Error> {
+    pub fn new(key: &str) -> Result<Bot, Error> {
         debug!("Create a new bot with the key {}", key);
 
         Ok(Bot {
-            handle: handle.clone(),
             key: key.into(),
-            name: RefCell::new(None),
-            last_id: Cell::new(0),
-            timeout: Cell::new(30),
-            handlers: RefCell::new(HashMap::new()),
-            unknown_handler: RefCell::new(None),
+            name: RwLock::new(None),
+            last_id: AtomicUsize::new(0),
+            timeout: AtomicUsize::new(120),
+            handlers: RwLock::new(HashMap::new()),
+            unknown_handler: RwLock::new(None),
             client: Client::builder()
                 .keep_alive(true)
                 .keep_alive_timeout(None)
@@ -205,8 +202,8 @@ pub fn _fetch(fut_res: ResponseFuture) -> impl Future<Item = String, Error = Err
 
 impl RcBot {
     /// Sets the timeout interval for long polling
-    pub fn timeout(self, timeout: u64) -> RcBot {
-        self.inner.timeout.set(timeout);
+    pub fn timeout(self, timeout: usize) -> RcBot {
+        self.inner.timeout.store(timeout, Ordering::Release);
 
         self
     }
@@ -224,7 +221,11 @@ impl RcBot {
             format!("/{}", cmd)
         };
 
-        self.inner.handlers.borrow_mut().insert(cmd.into(), sender);
+        if let Ok(mut handlers) = self.inner.handlers.write() {
+            handlers.insert(cmd.into(), sender);
+        } else {
+            warn!("poisoned lock in telebot");
+        }
 
         receiver.map_err(|_| Error::from(ErrorKind::Channel))
     }
@@ -233,7 +234,11 @@ impl RcBot {
     pub fn unknown_cmd(&self) -> impl Stream<Item = (RcBot, objects::Message), Error = Error> {
         let (sender, receiver) = mpsc::unbounded();
 
-        *self.inner.unknown_handler.borrow_mut() = Some(sender);
+        if let Ok(mut unknown_handler) = self.inner.unknown_handler.write() {
+            *unknown_handler = Some(sender);
+        } else {
+            warn!("poisoned lock in telebot");
+        }
 
         receiver.then(|x| x.map_err(|_| Error::from(ErrorKind::Channel)))
     }
@@ -241,9 +246,10 @@ impl RcBot {
     /// Register a new commnd
     pub fn register<T>(&self, hnd: T)
     where
-        T: Stream + 'static,
+        T: Stream + Send + 'static,
+        <T as Stream>::Error: Send
     {
-        self.inner.handle.spawn(
+        tokio::spawn(
             hnd.for_each(|_| Ok(()))
                 .into_future()
                 .map(|_| ())
@@ -257,17 +263,15 @@ impl RcBot {
     /// The message is forwarded to the returned stream if no command was found
     pub fn get_stream<'a>(
         &'a self,
-    ) -> impl Stream<Item = (RcBot, objects::Update), Error = Error> + 'a {
+    ) -> impl Stream<Item = (RcBot, objects::Update), Error = Error> + 'static {
         use functions::*;
-
-        stream::repeat(())
-            .and_then(move |_| {
-                self.get_updates()
-                    .offset(self.inner.last_id.get())
-                    .timeout(self.inner.timeout.get() as i64)
-                    .send()
-            })
-            .map(|(_, x)| {
+        let me = self.clone();
+        let y = stream::unfold((), move |_| {
+                Some(me.get_updates()
+                    .offset(me.inner.last_id.load(Ordering::Acquire) as i64)
+                    .timeout(me.inner.timeout.load(Ordering::Acquire) as i64)
+                    .send().map(|x| (x, ())))
+            }).map(|(_, x)| {
                 stream::iter_result(
                     x.0
                         .into_iter()
@@ -275,15 +279,17 @@ impl RcBot {
                         .collect::<Vec<Result<objects::Update, Error>>>(),
                 )
             })
-            .flatten()
-            .and_then(move |x| {
-                if self.inner.last_id.get() < x.update_id as u32 + 1 {
-                    self.inner.last_id.set(x.update_id as u32 + 1);
+            .flatten();
+        let me = self.clone();
+        let y = y.and_then(move |x| {
+                if me.inner.last_id.load(Ordering::Acquire) < x.update_id as usize + 1 {
+                    me.inner.last_id.store(x.update_id as usize + 1, Ordering::Release);
                 }
 
                 Ok(x)
-            })
-            .filter_map(move |mut val| {
+            });
+        let me = self.clone();
+        y.filter_map(move |mut val| {
                 debug!("Got an update from Telegram: {:?}", val);
 
                 let mut sndr: Option<UnboundedSender<(RcBot, objects::Message)>> = None;
@@ -293,19 +299,22 @@ impl RcBot {
                         let mut content = text.split_whitespace();
                         if let Some(mut cmd) = content.next() {
                             if cmd.starts_with("/") {
-                                if let Some(name) = self.inner.name.borrow().as_ref() {
-                                    if cmd.ends_with(name.as_str()) {
-                                        cmd = cmd.rsplitn(2, '@').skip(1).next().unwrap();
+                                if let Ok(guard) = me.inner.name.read() {
+                                    if let Some(ref name) = *guard {
+                                        if cmd.ends_with(name.as_str()) {
+                                            cmd = cmd.rsplitn(2, '@').skip(1).next().unwrap();
+                                        }
                                     }
                                 }
-                                if let Some(sender) = self.inner.handlers.borrow_mut().get_mut(cmd)
-                                {
-                                    sndr = Some(sender.clone());
-                                    message.text = Some(content.collect::<Vec<&str>>().join(" "));
-                                } else if let Some(ref mut sender) =
-                                    *self.inner.unknown_handler.borrow_mut()
-                                {
-                                    sndr = Some(sender.clone());
+                                if let Ok(guard) = me.inner.handlers.write() {
+                                    if let Some(sender) = guard.get(cmd) {
+                                        sndr = Some(sender.clone());
+                                        message.text = Some(content.collect::<Vec<&str>>().join(" "));
+                                    }
+                                } else if let Ok(guard) = me.inner.unknown_handler.write() {
+                                    if let Some(ref sender) = *guard {
+                                        sndr = Some(sender.clone());
+                                    }
                                 }
                             }
                         }
@@ -314,11 +323,11 @@ impl RcBot {
 
                 if let Some(sender) = sndr {
                     sender
-                        .unbounded_send((self.clone(), val.message.unwrap()))
+                        .unbounded_send((me.clone(), val.message.unwrap()))
                         .unwrap_or_else(|e| error!("Error: {}", e));
                     return None;
                 } else {
-                    return Some((self.clone(), val));
+                    return Some((me.clone(), val));
                 }
             })
     }
@@ -330,7 +339,12 @@ impl RcBot {
         let resolve_name = self.get_me().send()
             .map(move |user| {
                 if let Some(name) = user.1.username {
-                    bot.name.replace(Some(format!("@{}", name)));
+                    if let Ok(mut myname) = bot.name.write() {
+                        *myname = Some(format!("@{}", name));
+                    } else {
+                        warn!("poisoned lock in telebot");
+                    }
+
                 }
             })
             .map_err(|e| {
@@ -341,14 +355,12 @@ impl RcBot {
                 }
             });
         // spawn the task
-        self.inner.handle.spawn(resolve_name);
+        tokio::spawn(resolve_name.map_err(|_| ()));
     }
 
     /// helper function to start the event loop
-    pub fn run<'a>(&'a self, core: &mut Core) -> Result<(), Error> {
+    pub fn run(&self) {
         self.resolve_name();
-        core.run(self.get_stream().for_each(|_| Ok(())).into_future())
-            .context(ErrorKind::Tokio)
-            .map_err(Error::from)
+        tokio::run(self.get_stream().for_each(|_| Ok(())).map_err(|_| ()).into_future())
     }
 }

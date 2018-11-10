@@ -2,12 +2,11 @@
 //!
 //! telebot-derive implements setter, setter and send methods to each struct
 
-use std::{rc::Rc, convert::From};
+use std::{sync::Arc, convert::From};
 
 use serde_json;
 use failure::{Error, Fail};
 use futures::Future;
-use erased_serde::Serialize;
 
 use bot::{Bot, RcBot};
 use objects::{self, Integer};
@@ -722,7 +721,7 @@ pub struct AnswerCallbackQuery {
 #[function = "answer_inline_query"]
 pub struct AnswerInlineQuery {
     inline_query_id: String,
-    results: Vec<Box<Serialize>>,
+    results: Vec<objects::InlineQueryResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cache_time: Option<Integer>,
     #[serde(skip_serializing_if = "Option::is_none")]

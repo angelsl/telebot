@@ -9,7 +9,7 @@
     use proc_macro::TokenStream;
     use std::collections::BTreeMap;
 
-    #[proc_macro_derive(setter, attributes(query))]
+    #[proc_macro_derive(setter, attributes(query, wrap))]
     pub fn derive_setter(input: TokenStream) -> TokenStream {
         let ast = syn::parse_macro_input(&input.to_string()).unwrap();
         let expanded = expand_setter(ast);
@@ -89,6 +89,7 @@
         //let wrapper_name = syn::Ident::from(format!("Wrapper{}", name.as_ref()));
 
         if let Some(query_name) = query_kind {
+            let query_ident = syn::Ident::from(config.get("query").expect("query is present").as_str());
             quote! {
                 impl #name {
                     #[allow(dead_code)]
@@ -96,6 +97,30 @@
                         let id = Uuid::new_v4();
 
                         #name { kind: #query_name.into(), id: id.hyphenated().to_string(), #( #field_compulsory2: #values, )* }
+                    }
+
+                    #(
+                        pub fn #field_optional<S>(mut self, val: S) -> Self where S: Into<#ty_optional> {
+                            self.#field_optional2 = Some(val.into());
+
+                            self
+                        }
+                    )*
+                }
+
+                impl From<#name> for InlineQueryResult {
+                    fn from(me: #name) -> Self {
+                        InlineQueryResult::#query_ident(me)
+                    }
+                }
+            }
+        } else if let Some(wrap_name) = config.get("wrap") {
+            let wrap_ident = syn::Ident::from(wrap_name.as_str());
+            quote! {
+                impl #name {
+                    #[allow(dead_code)]
+                    pub fn new(#( #field_compulsory3: #ty_compulsory2, )*) -> #name {
+                        #name { #( #field_compulsory2: #values, )* }
                     }
                     #(
                         pub fn #field_optional<S>(mut self, val: S) -> Self where S: Into<#ty_optional> {
@@ -106,6 +131,11 @@
                     )*
                 }
 
+                impl From<#name> for #wrap_ident {
+                    fn from(me: #name) -> Self {
+                        #wrap_ident::#name(me)
+                    }
+                }
             }
         } else {
             quote! {
@@ -213,7 +243,7 @@ fn expand_function(ast: syn::MacroInput) -> quote::Tokens {
     let tokens = quote! {
         #[allow(dead_code)]
         pub struct #wrapper_name {
-            bot: Rc<Bot>,
+            bot: Arc<Bot>,
             inner: #name,
             file: Result<file::FileList, Error>
         }

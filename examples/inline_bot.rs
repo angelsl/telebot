@@ -1,41 +1,31 @@
-extern crate erased_serde;
 extern crate futures;
 extern crate telebot;
-extern crate tokio_core;
 
 use telebot::RcBot;
-use tokio_core::reactor::Core;
-use futures::stream::Stream;
+use futures::{IntoFuture, Future, stream::Stream};
 use std::env;
-use futures::IntoFuture;
-
-use erased_serde::Serialize;
 
 use telebot::functions::*;
 use telebot::objects::*;
 
 fn main() {
-    // Create a new tokio core
-    let mut lp = Core::new().unwrap();
-
     // Create the bot
-    let bot = RcBot::new(lp.handle(), &env::var("TELEGRAM_BOT_KEY").unwrap()).unwrap();
+    let bot = RcBot::new(&env::var("TELEGRAM_BOT_KEY").unwrap()).unwrap();
 
     let stream = bot.get_stream()
         .filter_map(|(bot, msg)| msg.inline_query.map(|query| (bot, query)))
         .and_then(|(bot, query)| {
-            let result: Vec<Box<Serialize>> = vec![
-                Box::new(
+            let result = vec![
                     InlineQueryResultArticle::new(
                         "Test".into(),
-                        Box::new(input_message_content::Text::new("This is a test".into())),
+                        input_message_content::Text::new("This is a test".into()).into(),
                     ).reply_markup(InlineKeyboardMarkup::new(vec![
                         vec![
                             InlineKeyboardButton::new("Wikipedia".into())
                                 .url("http://wikipedia.org"),
                         ],
-                    ])),
-                ),
+                    ]))
+                    .into()
             ];
 
             bot.answer_inline_query(query.id, result)
@@ -44,5 +34,5 @@ fn main() {
         });
 
     // enter the main loop
-    lp.run(stream.for_each(|_| Ok(())).into_future()).unwrap();
+    tokio::run(stream.for_each(|_| Ok(())).map_err(|_| ()).into_future());
 }

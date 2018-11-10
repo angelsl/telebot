@@ -61,7 +61,6 @@ extern crate log;
 #[macro_use]
 extern crate serde_derive;
 
-extern crate erased_serde;
 extern crate futures;
 extern crate hyper;
 extern crate hyper_multipart_rfc7578 as hyper_multipart;
@@ -69,7 +68,7 @@ extern crate hyper_tls;
 extern crate native_tls;
 extern crate serde;
 extern crate serde_json;
-extern crate tokio_core;
+extern crate tokio;
 extern crate uuid;
 
 #[macro_use]
