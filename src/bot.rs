@@ -309,7 +309,7 @@ impl RcBot {
                                 if let Ok(guard) = me.inner.handlers.write() {
                                     if let Some(sender) = guard.get(cmd) {
                                         sndr = Some(sender.clone());
-                                        message.text = Some(content.collect::<Vec<&str>>().join(" "));
+                                        message.text = text.get(cmd.len()..).map(|x| x.to_owned());
                                     }
                                 } else if let Ok(guard) = me.inner.unknown_handler.write() {
                                     if let Some(ref sender) = *guard {
