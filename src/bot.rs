@@ -301,6 +301,7 @@ impl RcBot {
                         let mut content = text.split_whitespace();
                         if let Some(mut cmd) = content.next() {
                             if cmd.starts_with("/") {
+                                let cmd_len = cmd.len();
                                 if let Ok(guard) = me.inner.name.read() {
                                     if let Some(ref name) = *guard {
                                         if cmd.ends_with(name.as_str()) {
@@ -311,7 +312,7 @@ impl RcBot {
                                 if let Ok(guard) = me.inner.handlers.write() {
                                     if let Some(sender) = guard.get(cmd) {
                                         sndr = Some(sender.clone());
-                                        message.text = text.get(cmd.len()..).map(|x| x.to_owned());
+                                        message.text = text.get(cmd_len..).map(|x| x.to_owned());
                                     }
                                 } else if let Ok(guard) = me.inner.unknown_handler.write() {
                                     if let Some(ref sender) = *guard {
