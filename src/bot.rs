@@ -34,6 +34,7 @@ impl RcBot {
 /// The main bot structure
 pub struct Bot {
     pub key: String,
+    pub id: RwLock<Option<objects::Integer>>,
     pub name: RwLock<Option<String>>,
     pub last_id: AtomicUsize,
     pub timeout: AtomicUsize,
@@ -48,6 +49,7 @@ impl Bot {
 
         Ok(Bot {
             key: key.into(),
+            id: RwLock::new(None),
             name: RwLock::new(None),
             last_id: AtomicUsize::new(0),
             timeout: AtomicUsize::new(120),
@@ -338,13 +340,18 @@ impl RcBot {
         // create a new task which resolves the bot name and then set it in the struct
         let resolve_name = self.get_me().send()
             .map(move |user| {
+                if let Ok(mut bid) = bot.id.write() {
+                    *bid = Some(user.1.id);
+                } else {
+                    warn!("poisoned lock in telebot");
+                }
+
                 if let Some(name) = user.1.username {
                     if let Ok(mut myname) = bot.name.write() {
                         *myname = Some(format!("@{}", name));
                     } else {
                         warn!("poisoned lock in telebot");
                     }
-
                 }
             })
             .map_err(|e| {
